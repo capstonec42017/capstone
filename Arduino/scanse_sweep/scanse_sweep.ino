@@ -6,8 +6,8 @@ const uint8_t FOV = 180;
 
 Sweep device(Serial);
 
-uint16_t closestDsistanceInSpecifiedFOV = 40000; /* 40 m, the farthest it can see. Used to compare to objects its
-seen so far */
+/* 40 m, the farthest it can see. Used to compare to objects its seen so far */
+uint16_t closestDistanceInSpecifiedFOV = 40000;
 
 // Arrays to store attributes of collected scans
 bool syncValues[500];         // 1 -> first reading of new scan, 0 otherwise
@@ -56,12 +56,11 @@ void loop() {
     // returns bool to end scanning
     currentState = STATE_GATHER_DATA;
     if (gatherDistanceInfo())
-      // Keep scanning until state is changed to STATE_STOP
-      // Call function to check for interrupt and change to STATE_STOP
+      // Stops when no more data to gather
       currentState = STATE_STOP;
     break;
   case STATE_ERROR:
-    // Error handling
+    // Need to add error handling
     reset();
     currentState = STATE_WAIT_ON_RESET;
   case STATE_STOP:
@@ -96,18 +95,22 @@ bool adjustDeviceSettings()
 }
 
 // Main scanning function, perform data analysis algorithms here
-// Should be in while loop with checkStopScanning as condition
 bool gatherDistanceInfo()
 {
-  b
-  ScanPacket reading = device.getReading()
-
-  return checkStopScanning();
+  while(!checkStopScanning())
+  {
+    // Reads while bool success is false
+    ScanPacket reading = device.getReading(false);
+  }
+  // Return true to get to STATE_STOP
+  return true;
 }
 
 // See if scan is complete
 // Should be based on user input not maxSyncValues
 // This implementation is temporary
+// True if should stop scanning
+// False if otherwise
 bool checkStopScanning()
 {
   if(syncValues[maxSyncValues - 1] == 1)
@@ -118,4 +121,11 @@ bool checkStopScanning()
   {
     return false;
   }
+}
+
+void reset()
+{
+  currentState = STATE_WAIT_ON_RESET;
+  closestDistanceInSpecifiedFOV = 4000;
+  device.reset();
 }
