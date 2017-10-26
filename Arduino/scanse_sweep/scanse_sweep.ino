@@ -1,3 +1,5 @@
+/* DOESN'T WORK SORRY, WORK IN PROGRESS. MODELED AFTER THE BLINK EXAMPLE */
+
 #include <Sweep.h>
 
 const uint8_t FOV = 180;
