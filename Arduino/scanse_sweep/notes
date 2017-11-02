@@ -1,0 +1,5 @@
+one scan is 360 degrees
+isSync returns true if reading is first of each scan ie 0 degrees
+0 degree at status led
+want to read between 90 and 270 in front of the bicycle
+reading must be greater than 270 and less than
