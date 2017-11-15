@@ -3,6 +3,7 @@
 #include <Sweep.h>
 
 const uint8_t FOV = 180;
+long warnTime = 0;
 
 Sweep device(Serial);
 
@@ -18,8 +19,10 @@ float angles[500];            // in degrees (accurate to the millidegree)
 uint8_t signalStrengths[500]; // 0:255, higher is better
 uint8_t maxSyncValues = 500;
 
+// Might want to change data type to better compute velocity
 uint16_t distances[3][50];
 uint16_t times[3][50];
+uint16_t velocities[3][50];
 bool warnState = false;
 
 // Finite States for the program sequence
@@ -36,6 +39,7 @@ uint8_t currentState = STATE_WAIT_ON_RESET;
 void setup() {
   // Initialize serial for the sweep device
   Serial.begin(115200); // sweep device
+  Serial1.begin(115200); // communications to steppers, not sure about port number
 
   // initialize counter variables and reset the current state
   reset();
@@ -62,16 +66,27 @@ void loop() {
     currentState = STATE_GATHER_DATA;
     gatherDistanceInfo();
     calculateClosingSpeeds();
-    if (checkForWarn()) {
-      if (timer > 1500) {
+    if(checkForWarn())
+    {
+      // Only increase breaking if warning signals have gone on for more than 1.5ms
+      if(warnState && ((millis() - warnTime) > 15000) && warnTime != 0)
+      {
         increaseBraking();
       }
-      else if (!warnState) {
+      else if((millis() - warnTime) < 15000)
+      {
+        // Make sure warn state is true and do nothing
         warnState = true;
-        // TODO: Start timer
+      }
+      // First sign of warning start timer and set warn state
+      else
+      {
+        warnTime = millis();
+        warnState = true;
       }
     }
-    else {
+    else
+    {
       warnState = false;
       decreaseBraking();
     }
@@ -178,11 +193,11 @@ bool checkForWarn() {
 }
 
 void increaseBraking() {
-  // TODO: send increase braking signal
+  Serial1.write(1);
 }
 
 void decreaseBraking() {
-  // TODO: send decrease braking signal
+  Serial1.write(0);
 }
 
 // See if scan is complete
