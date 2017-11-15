@@ -185,6 +185,14 @@ int findIndex(float angle) {
   return (int) angle + 75 % 360;
 }
 void calculateClosingSpeeds() {
+  // Compute velocities, can be simplified to save time, since this is overwriting known values
+  for(int i = 0; i < sizeof(velocities)/sizeof(velocities[0]); i++)
+  {
+    for(int j = 0; j < sizeof(velocities)/sizeof(velocities[0][0]); j++)
+    {
+      velocities[i][j] = distances[i][j] / times[i][j];
+    }
+  }
   
 }
 
