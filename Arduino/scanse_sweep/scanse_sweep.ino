@@ -1,55 +1,91 @@
-/* DOESN'T WORK SORRY, WORK IN PROGRESS. MODELED AFTER THE BLINK EXAMPLE */
+
+/* 
+  Scanse Sweep Arduino Library Examples
+  
+  MegaSerialPrinter:
+      - Example sketch for using the Scanse Sweep with the Arduino Mega 2560.
+        Collects 3 complete scans, and then prints the sensor readings
+      - Assumes Sweep sensor is physically connected to Serial #1 (RX1 & TX1)
+        - For the sweep's power, ground, RX & TX pins, follow the connector 
+          pinouts in the sweep user manual located here: 
+          http://scanse.io/downloads
+        - Be sure to connect RX_device -> TX_arduino & TX_device -> RX_arduino
+      - For best results, you should provide dedicated external 5V power to the Sweep
+        rather than using power from the Arduino. Just be sure to connect the ground 
+        from the power source and the arduino. If you are just experimenting, you can
+        run the sweep off the 5V power from the Arduino with the Arduino receiving power
+        over USB. However this has only been tested with an external powered USB hub. 
+        It is possible that using a low power USB port (ex: laptop) to power the 
+        arduino & sweep together will result in unexpected behavior. 
+      - Note that running off of USB power is not entirely adequate for the sweep, 
+        so the quantity and qaulity of sensor readings will drop. This is OK for
+        this example, as it is only meant to provide some visual feedback over 
+        the serial monitor.
+      - In your own projects, be sure to use dedicated power instead of the USB.
+  Created by Scanse LLC, February 21, 2017.
+  Released into the public domain.
+*/
 
 #include <Sweep.h>
 
-const uint8_t FOV = 180;
-long warnTime = 0;
+// Create a Sweep device using Serial #1 (RX1 & TX1)
+Sweep device(Serial1);
 
-Sweep device(Serial);
+// keeps track of how many scans have been collected
+uint8_t scanCount = 0;
 
-/* 40 m, the farthest it can see. Used to compare to objects its seen so far */
-uint16_t closestDistanceInSpecifiedFOV = 40000;
-// Start and end angles for scanning
-float beginAngle = 285.0;
-float endAngle = 75.0;
+uint16_t SIG_STRENGTH_MIN = 40; // Set via testing
+float BEGIN_ANGLE = 285.0;
+float END_ANGLE = 75.0;
+float FRICTION_COEFFICIENT = 0.7;
+float GRAVITY = 9.806; // units: meters/second^2
+
 
 // Arrays to store attributes of collected scans
-bool syncValues[500];         // 1 -> first reading of new scan, 0 otherwise
-float angles[500];            // in degrees (accurate to the millidegree)
-uint8_t signalStrengths[500]; // 0:255, higher is better
-uint8_t maxSyncValues = 500;
-
-// Might want to change data type to better compute velocity
 uint16_t distances[3][50];
 uint16_t times[3][50];
-uint16_t velocities[3][50];
+uint16_t velocities[50];
 bool warnState = false;
+long warnTime = 0;
 
 // Finite States for the program sequence
-const uint8_t STATE_WAIT_ON_RESET = 0;
+const uint8_t STATE_WAIT_FOR_USER_INPUT = 0;
 const uint8_t STATE_ADJUST_DEVICE_SETTINGS = 1;
 const uint8_t STATE_VERIFY_CURRENT_DEVICE_SETTINGS = 2;
 const uint8_t STATE_BEGIN_DATA_ACQUISITION = 3;
 const uint8_t STATE_GATHER_DATA = 4;
-const uint8_t STATE_ERROR = 5;
+const uint8_t STATE_STOP_DATA_ACQUISITION = 5;
+const uint8_t STATE_RESET = 6;
+const uint8_t STATE_ERROR = 7;
+
 
 // Current state in the program sequence
-uint8_t currentState = STATE_WAIT_ON_RESET;
+uint8_t currentState;
 
-void setup() {
-  // Initialize serial for the sweep device
-  Serial.begin(115200); // sweep device
-  Serial1.begin(115200); // communications to steppers, not sure about port number
+// String to collect user input over serial
+String userInput = "";
+
+void setup()
+{
+  // Initialize serial
+  Serial.begin(9600);    // serial terminal on the computer
+  Serial1.begin(115200); // sweep device
+
+  // reserve space to accumulate user message
+  userInput.reserve(50);
 
   // initialize counter variables and reset the current state
   reset();
 }
 
-void loop() {
+// Loop functions as an FSM (finite state machine)
+void loop()
+{
   switch (currentState)
   {
-  case STATE_WAIT_ON_RESET:
-    currentState = waitOnReset() ? STATE_ADJUST_DEVICE_SETTINGS : STATE_ERROR;
+  case STATE_WAIT_FOR_USER_INPUT:
+    if (listenForUserInput())
+      currentState = STATE_ADJUST_DEVICE_SETTINGS;
     break;
   case STATE_ADJUST_DEVICE_SETTINGS:
     currentState = adjustDeviceSettings() ? STATE_VERIFY_CURRENT_DEVICE_SETTINGS : STATE_ERROR;
@@ -58,71 +94,53 @@ void loop() {
     currentState = verifyCurrentDeviceSettings() ? STATE_BEGIN_DATA_ACQUISITION : STATE_ERROR;
     break;
   case STATE_BEGIN_DATA_ACQUISITION:
-    // Attempt to start scanning (will wait for motor speed to stabilize and calibration routine to complete...)
-    currentState = device.startScanning() ? STATE_GATHER_DATA : STATE_ERROR;
+    currentState = beginDataCollectionPhase() ? STATE_GATHER_DATA : STATE_ERROR;
     break;
   case STATE_GATHER_DATA:
-    // returns bool to end scanning
-    currentState = STATE_GATHER_DATA;
-    gatherDistanceInfo();
-    calculateClosingSpeeds();
-    if(checkForWarn())
-    {
-      // Only increase breaking if warning signals have gone on for more than 1.5ms
-      if(warnState && ((millis() - warnTime) > 15000) && warnTime != 0)
-      {
-        increaseBraking();
-      }
-      else if((millis() - warnTime) < 15000)
-      {
-        // Make sure warn state is true and do nothing
-        warnState = true;
-      }
-      // First sign of warning start timer and set warn state
-      else
-      {
-        warnTime = millis();
-        warnState = true;
-      }
-    }
-    else
-    {
-      warnState = false;
-      decreaseBraking();
-    }
+    gatherSensorReading();
+    currentState = scanCount > 2 ? STATE_STOP_DATA_ACQUISITION : STATE_GATHER_DATA;
     break;
-  case STATE_ERROR:
-    // Need to add error handling
+  case STATE_STOP_DATA_ACQUISITION:
+    currentState = stopDataCollectionPhase() ? STATE_RESET : STATE_ERROR;
+    break;
+  case STATE_RESET:
+    Serial.println("\n\nAttempting to reset and run the program again...");
     reset();
-    currentState = STATE_WAIT_ON_RESET;
+    currentState = STATE_WAIT_FOR_USER_INPUT;
+    break;
   default: // there was some error
-    // DO NOTHING
+    Serial.println("\n\nAn error occured. Attempting to reset and run program again...");
+    reset();
+    currentState = STATE_WAIT_FOR_USER_INPUT;
     break;
   }
 }
 
-// Wait ~8 seconds for the device to reset and verifies it can communicate
-bool waitOnReset()
+// checks if the user has communicated anything over serial
+// looks for the user to send "start"
+bool listenForUserInput()
 {
-  for(int i = 0; i < 8; i++)
+  while (Serial.available())
   {
-    delay(1000);
+    userInput += (char)Serial.read();
   }
-  return device.getSampleRate() > 0;
+  if (userInput.indexOf("start") != -1)
+  {
+    Serial.println("Registered user start.");
+    return true;
+  }
+  return false;
 }
 
-// Adjusts default settings
+// Adjusts the device settings
 bool adjustDeviceSettings()
 {
-  // Set the motor speed to 4HZ
-  bool bSuccessMotorSpeed = device.setMotorSpeed(MOTOR_SPEED_CODE_4_HZ);
+  // Set the motor speed to 5HZ (codes available from 1->10 HZ)
+  bool bSuccess = device.setMotorSpeed(MOTOR_SPEED_CODE_5_HZ);
+  Serial.println(bSuccess ? "\nSuccessfully set motor speed." : "\nFailed to set motor speed");
 
-  // Set the sample rate to 1000HZ
-  bool bSuccessSampRate = device.setSampleRate(SAMPLE_RATE_CODE_1000_HZ);
-
-  return bSuccessSampRate && bSuccessMotorSpeed;
+  return bSuccess;
 }
-
 
 // Querries the current device settings (motor speed and sample rate)
 // and prints them to the console
@@ -131,105 +149,163 @@ bool verifyCurrentDeviceSettings()
   // Read the current motor speed and sample rate
   int32_t currentMotorSpeed = device.getMotorSpeed();
   if (currentMotorSpeed < 0)
+  {
+    Serial.println("\nFailed to get current motor speed");
     return false;
+  }
   int32_t currentSampleRate = device.getSampleRate();
   if (currentSampleRate < 0)
+  {
+    Serial.println("\nFailed to get current sample rate");
     return false;
+  }
+
+  // Report the motor speed and sample rate to the computer terminal
+  Serial.println("\nMotor Speed Setting: " + String(currentMotorSpeed) + " HZ");
+  Serial.println("Sample Rate Setting: " + String(currentSampleRate) + " HZ");
+
   return true;
 }
 
-// Main scanning function, perform data analysis algorithms here
-void gatherDistanceInfo()
+// Initiates the data collection phase (begins scanning)
+bool beginDataCollectionPhase()
 {
+  // Attempt to start scanning
+  Serial.println("\nWaiting for motor speed to stabilize and calibration routine to complete...");
+  bool bSuccess = device.startScanning();
+  Serial.println(bSuccess ? "\nSuccessfully initiated scanning..." : "\nFailed to start scanning.");
+  if (bSuccess)
+    Serial.println("\nGathering 3 scans...");
+  return bSuccess;
+}
+
+// Gathers individual sensor readings until 3 complete scans have been collected
+void gatherSensorReading()
+{
+  // attempt to get the next scan packet
+  // Note: getReading() will write values into the "reading" variable
   unsigned long readTime;
   bool success = false;
-  ScanPacket last = device.getReading(success);
-  ScanPacket curr = device.getReading(success);
-  while (!(last.getAngleDegrees() <= beginAngle && curr.getAngleDegrees() >= beginAngle)) {
-    last = curr;
-    curr = device.getReading(success);
+  // For testing
+  scanCount += 1;
+  ScanPacket reading = device.getReading(success);
+  while (reading.getAngleDegrees() < BEGIN_ANGLE || reading.getAngleDegrees() > END_ANGLE) {
+    reading = device.getReading(success);
     readTime = millis();
   }
   int currIndex = 0;
   int readIndex;
-  while (curr.getAngleDegrees() >= beginAngle || curr.getAngleDegrees() <= endAngle) {
-    readIndex = findIndex(curr.getAngleDegrees());
-    if (readIndex >= currIndex) {
+  while (reading.getAngleDegrees() >= BEGIN_ANGLE || reading.getAngleDegrees() <= END_ANGLE) {
+    readIndex = findIndex(reading.getAngleDegrees());
+    if (readIndex >= currIndex && reading.getSignalStrength() >= SIG_STRENGTH_MIN) {
       distances[2][readIndex] = distances[1][readIndex];
       distances[1][readIndex] = distances[0][readIndex];
-      distances[0][readIndex] = curr.getAngleDegrees();
+      distances[0][readIndex] = reading.getDistanceCentimeters();
 
       times[2][readIndex] = times[1][readIndex];
       times[1][readIndex] = times[0][readIndex];
-      times[0][readIndex] = 
+      times[0][readIndex] = readTime;
 
       currIndex = readIndex + 1;
     }
-    curr = device.getReading(success);
+    reading = device.getReading(success);
     readTime = millis();
   }
 
-
-  /******************************* OLD CODE *******************************/
-  while(!checkStopScanning())
-  {
-    // Reads while bool success is false
-    //bool success = false;
-    ScanPacket reading = device.getReading(success);
-  }
-  // Return true to get to STATE_STOP
-  return true;
+  analyze();
 }
 
 int findIndex(float angle) {
-  return (int) angle + 75 % 360;
-}
-void calculateClosingSpeeds() {
-  // Compute velocities, can be simplified to save time, since this is overwriting known values
-  for(int i = 0; i < sizeof(velocities)/sizeof(velocities[0]); i++)
-  {
-    for(int j = 0; j < sizeof(velocities)/sizeof(velocities[0][0]); j++)
-    {
-      velocities[i][j] = distances[i][j] / times[i][j];
-    }
-  }
-  
+  return ((int) angle + 75) % 360;
 }
 
-bool checkForWarn() {
-  
-}
-
-void increaseBraking() {
-  Serial1.write(1);
-}
-
-void decreaseBraking() {
-  Serial1.write(0);
-}
-
-// See if scan is complete
-// Should be based on user input not maxSyncValues
-// This implementation is temporary
-// True if should stop scanning
-// False if otherwise
-bool checkStopScanning()
+void analyze()
 {
-  if(syncValues[maxSyncValues - 1] == 1)
+  calculateClosingSpeeds();
+  if(checkForWarn())
   {
-    return true;
+    // Only increase breaking if warning signals have gone on for more than 1.5ms
+    if(warnState && ((millis() - warnTime) >= 1500) && warnTime != 0)
+    {
+      increaseBraking();
+    }
+    else if((millis() - warnTime) < 1500)
+    {
+      // Make sure warn state is true and do nothing
+      warnState = true;
+    }
+    // First sign of warning start timer and set warn state
+    else
+    {
+      warnTime = millis();
+      warnState = true;
+    }
   }
   else
   {
-    return false;
+    warnState = false;
+    warnTime = 0;
+    decreaseBraking();
   }
 }
 
+bool checkForWarn()
+{
+  int stoppingDistance;
+  for (int i = 0; i < 50; i++) {
+    stoppingDistance = velocities[i]*1.5 + sq(velocities[i])/(2 * FRICTION_COEFFICIENT * GRAVITY) + 200;
+    if (stoppingDistance >= distances[0][i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void calculateClosingSpeeds() {
+  for (int i = 0; i < 50; i++) {
+    velocities[i] = max((distances[2][i] - distances[0][i]) / (times[0][i] - times[2][i]),
+            (distances[1][i] - distances[0][i]) / (times[0][i] - times[1][i]));
+  }
+}
+
+void increaseBraking() {
+  // TODO: Send interrupt to Pro Mini
+}
+
+void decreaseBraking() {
+  // TODO: Send interrupt to Pro Mini
+}
+
+// Terminates the data collection phase (stops scanning)
+bool stopDataCollectionPhase()
+{
+  // Attempt to stop scanning
+  bool bSuccess = device.stopScanning();
+
+  Serial.println(bSuccess ? "\nSuccessfully stopped scanning." : "\nFailed to stop scanning.");
+
+  for (int i = 0; i < 3; i++) {
+    Serial.println("\nScan " + String(i) + ":\n");
+    for (int j = 0; j < 50; j++) {
+      Serial.println("Index: " + String(j) + ", Distance: " + String(distances[i][j]) + ", Time: " + String(times[i][j]) 
+                      + ", Velocity: " + String(velocities[j]) + "\n");
+    }
+  }
+  return bSuccess;
+}
+
+// Resets the variables and state so the sequence can be repeated
 void reset()
 {
-  currentState = STATE_WAIT_ON_RESET;
-  closestDistanceInSpecifiedFOV = 4000;
+  scanCount = 0;
+  // reset the sensor
+  device.reset();
+  delay(50);
+  Serial.flush();
+  userInput = "";
   memset(times, 0, sizeof(times));
   memset(distances, 0, sizeof(distances));
-  device.reset();
+  memset(velocities, 0, sizeof(velocities));
+  Serial.println("\n\nWhenever you are ready, type \"start\" to to begin the sequence...");
+  currentState = 0;
 }
