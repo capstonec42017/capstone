@@ -70,6 +70,7 @@ void setup()
   // Initialize serial
   Serial.begin(9600);    // serial terminal on the computer
   Serial1.begin(115200); // sweep device
+  Serial2.begin(9600);   // serial connection for arduino pro mini, verify speed
 
   // reserve space to accumulate user message
   userInput.reserve(50);
@@ -269,11 +270,13 @@ void calculateClosingSpeeds() {
 }
 
 void increaseBraking() {
-  // TODO: Send interrupt to Pro Mini
+  // Send interrupt to Pro Mini
+  Serial2.write(1);
 }
 
 void decreaseBraking() {
-  // TODO: Send interrupt to Pro Mini
+  // Send interrupt to Pro Mini
+  Serial2.write(0);
 }
 
 // Terminates the data collection phase (stops scanning)
