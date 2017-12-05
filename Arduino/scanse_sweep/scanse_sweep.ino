@@ -35,16 +35,17 @@ Sweep device(Serial1);
 uint8_t scanCount = 0;
 
 uint16_t SIG_STRENGTH_MIN = 40; // Set via testing
-float BEGIN_ANGLE = 285.0;
-float END_ANGLE = 75.0;
+float BEGIN_ANGLE = 285;
+float END_ANGLE = 75;
 float FRICTION_COEFFICIENT = 0.7;
-float GRAVITY = 9.806; // units: meters/second^2
+float GRAVITY = 980.6; // units: centimeters/second^2
 
 
 // Arrays to store attributes of collected scans
 uint16_t distances[3][50];
 uint16_t times[3][50];
-uint16_t velocities[50];
+long velocities[50];
+float angleVec[3][50];
 bool warnState = false;
 long warnTime = 0;
 
@@ -70,10 +71,13 @@ void setup()
   // Initialize serial
   Serial.begin(9600);    // serial terminal on the computer
   Serial1.begin(115200); // sweep device
-  Serial2.begin(9600);   // serial connection for arduino pro mini, verify speed
+  Serial2.begin(9600);   // serial connection for arduino pro mini, verified with Allen
 
   // reserve space to accumulate user message
   userInput.reserve(50);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
 
   // initialize counter variables and reset the current state
   reset();
@@ -99,7 +103,7 @@ void loop()
     break;
   case STATE_GATHER_DATA:
     gatherSensorReading();
-    currentState = scanCount > 2 ? STATE_STOP_DATA_ACQUISITION : STATE_GATHER_DATA;
+    currentState = scanCount > 10 ? STATE_STOP_DATA_ACQUISITION : STATE_GATHER_DATA;
     break;
   case STATE_STOP_DATA_ACQUISITION:
     currentState = stopDataCollectionPhase() ? STATE_RESET : STATE_ERROR;
@@ -137,8 +141,10 @@ bool listenForUserInput()
 bool adjustDeviceSettings()
 {
   // Set the motor speed to 5HZ (codes available from 1->10 HZ)
-  bool bSuccess = device.setMotorSpeed(MOTOR_SPEED_CODE_5_HZ);
+  bool bSuccess = device.setMotorSpeed(MOTOR_SPEED_CODE_3_HZ);
   Serial.println(bSuccess ? "\nSuccessfully set motor speed." : "\nFailed to set motor speed");
+
+  bSuccess = device.setSampleRate(SAMPLE_RATE_CODE_750_HZ);
 
   return bSuccess;
 }
@@ -183,14 +189,16 @@ bool beginDataCollectionPhase()
 // Gathers individual sensor readings until 3 complete scans have been collected
 void gatherSensorReading()
 {
+  Serial.println("gathering sensor reading");
   // attempt to get the next scan packet
   // Note: getReading() will write values into the "reading" variable
   unsigned long readTime;
   bool success = false;
   // For testing
   scanCount += 1;
+  Serial1.flush();
   ScanPacket reading = device.getReading(success);
-  while (reading.getAngleDegrees() < BEGIN_ANGLE || reading.getAngleDegrees() > END_ANGLE) {
+  while (reading.getAngleDegrees() < BEGIN_ANGLE && reading.getAngleDegrees() > END_ANGLE) {
     reading = device.getReading(success);
     readTime = millis();
   }
@@ -198,7 +206,8 @@ void gatherSensorReading()
   int readIndex;
   while (reading.getAngleDegrees() >= BEGIN_ANGLE || reading.getAngleDegrees() <= END_ANGLE) {
     readIndex = findIndex(reading.getAngleDegrees());
-    if (readIndex >= currIndex && reading.getSignalStrength() >= SIG_STRENGTH_MIN) {
+    if (readIndex >= currIndex && reading.getSignalStrength() >= SIG_STRENGTH_MIN && reading.getAngleDegrees() <= 360) {
+//      Serial.println("Angle: " + String(reading.getAngleDegrees()) + ", Read index: " + String(readIndex));
       distances[2][readIndex] = distances[1][readIndex];
       distances[1][readIndex] = distances[0][readIndex];
       distances[0][readIndex] = reading.getDistanceCentimeters();
@@ -206,6 +215,10 @@ void gatherSensorReading()
       times[2][readIndex] = times[1][readIndex];
       times[1][readIndex] = times[0][readIndex];
       times[0][readIndex] = readTime;
+
+      angleVec[2][readIndex] = angleVec[1][readIndex];
+      angleVec[1][readIndex] = angleVec[0][readIndex];
+      angleVec[0][readIndex] = reading.getAngleDegrees();
 
       currIndex = readIndex + 1;
     }
@@ -217,7 +230,7 @@ void gatherSensorReading()
 }
 
 int findIndex(float angle) {
-  return ((int) angle + 75) % 360;
+  return (((int) angle + 75) % 360) / 3;
 }
 
 void analyze()
@@ -225,6 +238,7 @@ void analyze()
   calculateClosingSpeeds();
   if(checkForWarn())
   {
+    digitalWrite(LED_BUILTIN, HIGH);
     // Only increase breaking if warning signals have gone on for more than 1.5ms
     if(warnState && ((millis() - warnTime) >= 1500) && warnTime != 0)
     {
@@ -249,6 +263,12 @@ void analyze()
     decreaseBraking();
   }
 }
+void calculateClosingSpeeds() {
+  for (int i = 0; i < 50; i++) {
+    velocities[i] = /*max((distances[2][i] - distances[0][i]) / (times[0][i] - times[2][i]),*/
+            (distances[1][i] - distances[0][i]) / (times[0][i] - times[1][i]);
+  }
+}
 
 bool checkForWarn()
 {
@@ -260,13 +280,6 @@ bool checkForWarn()
     }
   }
   return false;
-}
-
-void calculateClosingSpeeds() {
-  for (int i = 0; i < 50; i++) {
-    velocities[i] = max((distances[2][i] - distances[0][i]) / (times[0][i] - times[2][i]),
-            (distances[1][i] - distances[0][i]) / (times[0][i] - times[1][i]));
-  }
 }
 
 void increaseBraking() {
@@ -291,7 +304,7 @@ bool stopDataCollectionPhase()
     Serial.println("\nScan " + String(i) + ":\n");
     for (int j = 0; j < 50; j++) {
       Serial.println("Index: " + String(j) + ", Distance: " + String(distances[i][j]) + ", Time: " + String(times[i][j]) 
-                      + ", Velocity: " + String(velocities[j]) + "\n");
+                      + ", Velocity: " + String(velocities[j]) + ", Angle: "  + /*String(angleVec[i][j], 3) + */"\n");
     }
   }
   return bSuccess;
@@ -309,6 +322,7 @@ void reset()
   memset(times, 0, sizeof(times));
   memset(distances, 0, sizeof(distances));
   memset(velocities, 0, sizeof(velocities));
+  memset(angleVec, 0, sizeof(angleVec));
   Serial.println("\n\nWhenever you are ready, type \"start\" to to begin the sequence...");
   currentState = 0;
 }
