@@ -66,6 +66,10 @@ uint8_t currentState;
 // String to collect user input over serial
 String userInput = "";
 
+// Pin for piezzo buzzer
+const int buzzerPin = 2;
+const int buttonPin = 3;
+
 void setup()
 {
   // Initialize serial
@@ -78,6 +82,10 @@ void setup()
 
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
+  pinMode(buzzerPin, OUTPUT);
+  // interrupt for button, depending on how its wired in, use rise or falling instead of change to avoid buttonFlag
+
+  attachInterrupt(digitalPinToInterrupt(buttonPin), releaseBrakes, HIGH); // set up interrupt for button, add case to send a 2 to Serial 2
 
   // initialize counter variables and reset the current state
   reset();
@@ -144,7 +152,7 @@ bool adjustDeviceSettings()
   bool bSuccess = device.setMotorSpeed(MOTOR_SPEED_CODE_3_HZ);
   Serial.println(bSuccess ? "\nSuccessfully set motor speed." : "\nFailed to set motor speed");
 
-  bSuccess = device.setSampleRate(SAMPLE_RATE_CODE_750_HZ);
+  bSuccess = device.setSampleRate(SAMPLE_RATE_CODE_500_HZ);
 
   return bSuccess;
 }
@@ -248,6 +256,10 @@ void analyze()
     {
       // Make sure warn state is true and do nothing
       warnState = true;
+
+      // Sound piezzo buzzer, 262 Hz for 10 ms
+      tone(buzzerPin, 262, 10);
+      
     }
     // First sign of warning start timer and set warn state
     else
@@ -276,6 +288,7 @@ bool checkForWarn()
   for (int i = 0; i < 50; i++) {
     stoppingDistance = velocities[i]*1.5 + sq(velocities[i])/(2 * FRICTION_COEFFICIENT * GRAVITY) + 200;
     if (stoppingDistance >= distances[0][i]) {
+      Serial.println("Found warning\n");
       return true;
     }
   }
@@ -292,6 +305,11 @@ void decreaseBraking() {
   Serial2.write(0);
 }
 
+void releaseBrakes() {
+  // Send interrupt to Pro mini
+  Serial2.write(2);
+}
+
 // Terminates the data collection phase (stops scanning)
 bool stopDataCollectionPhase()
 {
@@ -304,7 +322,7 @@ bool stopDataCollectionPhase()
     Serial.println("\nScan " + String(i) + ":\n");
     for (int j = 0; j < 50; j++) {
       Serial.println("Index: " + String(j) + ", Distance: " + String(distances[i][j]) + ", Time: " + String(times[i][j]) 
-                      + ", Velocity: " + String(velocities[j]) + ", Angle: "  + /*String(angleVec[i][j], 3) + */"\n");
+                      + ", Velocity: " + String(velocities[j]) + ", Angle: "  + String(angleVec[i][j], 3) + "\n");
     }
   }
   return bSuccess;
