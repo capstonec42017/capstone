@@ -43,16 +43,14 @@
 const uint16_t DIST_CM_MIN = 1;   // (cm) Clip range values on the low end
 const uint16_t DIST_CM_MAX = 100; // (cm) Clip range values on the high end
 const uint16_t DIST_CM_RANGE = DIST_CM_MAX - DIST_CM_MIN;
-const uint16_t BLINK_INTERVAL_MS_MIN = 100;  // (milliseconds) Min blink interval, indicates max distance
-const uint16_t BLINK_INTERVAL_MS_MAX = 2000; // (milliseconds) Max blink interval, indicates min distance
-const uint16_t BLINK_INTERVAL_MS_RANGE = BLINK_INTERVAL_MS_MAX - BLINK_INTERVAL_MS_MIN;
 
 // the angular range (Field of View). The distance of the shortest valid ranging in the
 // angular window between [360-FOV: 0] degrees will be used.
 // (0 deg corresponds to the thin groove + LED on the face of the sweep device)
 const uint8_t FOV = 5;
-float FRICTION_COEFFICIENT = 0.7;
-float GRAVITY = 9.806; // units: centimeters/second^2
+float FRICTION_COEFFICIENT = 0.1;
+float GRAVITY = 9.806; // units: meters/second^2
+const uint8_t BRAKE_STATES = 6;
 
 // Finite States for the program sequence
 const uint8_t STATE_WAIT_ON_RESET = 0;
@@ -68,14 +66,18 @@ const uint8_t STATE_ERROR = 7;
 Sweep device(Serial1);
 
 uint16_t closestDistanceInSpecifiedFOV = 4000; // the distance (in cm) of the closest object in the specified angular range
-uint16_t interval = 3000;                      // interval at which to blink onboard LED (milliseconds)
+uint16_t interval = 1000;                      // interval at which to blink onboard LED (milliseconds)
+uint16_t brakeCheckInterval = 500;            // interval at which to check and change braking (milliseconds)
 int ledState = LOW;                            // ledState used to set the LED
 unsigned long previousMillis = 0;              // time of the last LED update
+unsigned long lastBrakeCheckMillis = 0;       // time braking was last increased/decreased
 
-uint16_t distances[2];
-unsigned long times[2];
+uint16_t distances[3];
+unsigned long times[3];
 long velocities;
-bool warnState;// = false;
+bool danger;
+bool warnState;
+unsigned int brakeCount;
 
 // Current state in the program sequence
 uint8_t currentState = STATE_WAIT_ON_RESET;
@@ -85,7 +87,11 @@ void setup()
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
-
+  pinMode(8, OUTPUT);
+  pinMode(10, OUTPUT);
+  digitalWrite(8, LOW);
+  digitalWrite(10, LOW);
+  
   // initialize serial1 for the sweep device
   Serial1.begin(115200); // sweep device
   Serial.begin(9600);
@@ -133,8 +139,7 @@ void loop()
     interval = 10; // short enough interval to make the LED appear as if it is ON
     break;
   }
-  //if (warnState)
-    updateLED();
+  updateLED();
 }
 
 // Waits ~8 seconds for the device to reset and verifies it can communicate
@@ -201,11 +206,11 @@ bool gatherDistanceInfo()
       uint16_t dist = reading.getDistanceCentimeters();
       if (dist > 1)
       {
-        //distances[2] = distances[1];
+        distances[2] = distances[1];
         distances[1] = distances[0];
         distances[0] = dist;
 
-        //times[2] = times[1];
+        times[2] = times[1];
         times[1] = times[0];
         times[0] = currTime;
         return true;
@@ -215,58 +220,91 @@ bool gatherDistanceInfo()
   return false;
 }
 
-// Updates the blink frequency based off the average distance around the azimuth 0 degree mark
+// Updates the stopping distances and set danger flag
 void updateBlinkFrequency()
 {
+  float dist2 = (float) (long)distances[2];
   float dist1 = (float) (long)distances[1];
   float dist0 = (float) (long)distances[0];
+  float time2 = (float) (long) times[2];
   float time1 = (float) (long) times[1];
   float time0 = (float) (long) times[0];
   
-  float velo = 10 * (dist1 - dist0) / ((time0 - time1));
+  float velo1 = 10 * (dist1 - dist0) / ((time0 - time1));
+  float velo2 = 10 * (dist2 - dist0) / ((time0 - time2));
+  float velo = min(velo1, velo2);
   //Serial.print("D0 " + String(dist0) + " D1 " + String(dist1) + " T0 " + String(time0) + " T1 " + String(time1) + " Velo " + String(velo) + "\n");
-  float stopping_distance = velo*1.5 + sq(velo)/(2 * FRICTION_COEFFICIENT * GRAVITY) + (float)2;
+  float stopping_distance = velo*2.0 + sq(velo)/(2 * FRICTION_COEFFICIENT * GRAVITY) + (float)1.5;
   //Serial.print("Stopping: " + String(stopping_distance) + "\n"); 
   if (stopping_distance * 100 > dist0) {
     //Serial.print("Warning\n");
-    warnState = true;
+    danger = true;
   }
   else {
-    warnState = false;
+    danger = false;
   }
   
 }
 
-// update the LED if necessary (if the difference between the current
-// time and last update time is greater thant the desired interval)
+// Pull/release brakes, check if the system is still "involved" (either warning signal or actually braking)
 void updateLED()
 {
-    unsigned long currentMillis = millis();
-    //Serial.print("Current: " + String(currentMillis) + " previous: " + String(previousMillis) + "\n");
-    if (previousMillis == 0 && warnState) {
-      previousMillis = currentMillis;
-      ledState = HIGH;
-      digitalWrite(LED_BUILTIN, ledState);
+  int state = LOW;
+  digitalWrite(8, state);
+  digitalWrite(10, state);
+  unsigned long currentMillis = millis();
+  //Serial.print("Current: " + String(currentMillis) + " previous: " + String(previousMillis) + "\n");
+  // enter danger state, start warning
+  if (previousMillis == 0 && danger) {
+    warnState = true;
+    previousMillis = currentMillis;
+    ledState = HIGH;
+    digitalWrite(LED_BUILTIN, ledState);
+  }
+  // past end of just warning, start or continue braking
+  else if (previousMillis > 0 && currentMillis - previousMillis >= interval)
+  {
+    if (currentMillis - lastBrakeCheckMillis >= brakeCheckInterval) {
+      lastBrakeCheckMillis = currentMillis;
+      if (danger) {
+        increaseBraking();
+      }
+      // decreaseBraking returns true on an attempt to decrease braking past 0
+      else if (decreaseBraking()) {
+        // reset timestamp
+        previousMillis = 0;
+        // determine the new State
+        ledState = LOW;
+        // toggle the LED
+        digitalWrite(LED_BUILTIN, ledState);
+        danger = false;
+      }
     }
-    else if (currentMillis - previousMillis >= interval)
-    {
-      // store the timestamp
-      previousMillis = 0;
-  
-      // determine the new State
-      ledState = LOW;
-      // toggle the LED
-      digitalWrite(LED_BUILTIN, ledState);
-      previousMillis = 0;
-      warnState = false;
-    }
-//  else {
-//    previousMillis = 0;
-//  }
+  }
+}
 
+void increaseBraking()
+{
+  if (brakeCount < BRAKE_STATES) {
+    brakeCount += 1;
+    int state = HIGH;
+    digitalWrite(8, state);
+    Serial.print("I\n");
+    //Serial2.write(1);
+  }
+}
 
-  //ledState = warnState ? HIGH : LOW;
-  //digitalWrite(LED_BUILTIN, ledState);
+bool decreaseBraking()
+{
+  if (brakeCount == 0) {
+    return true;
+  }
+  brakeCount -= 1;
+  int state = HIGH;
+  digitalWrite(10, state);
+  Serial.print("D\n");
+  //Serial2.write(0);
+  return false;
 }
 
 // Resets the variables and state so the sequence can be repeated
@@ -277,7 +315,9 @@ void reset()
   memset(times, 0, sizeof(times));
   memset(distances, 0, sizeof(distances));
   memset(velocities, 0, sizeof(velocities));
+  danger = false;
   warnState = false;
+  brakeCount = 0;
   ledState = LOW;
   //digitalWrite(LED_BUILTIN, ledState); // turn the LED off by making the voltage LOW
   device.reset();
