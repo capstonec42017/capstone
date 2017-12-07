@@ -78,15 +78,26 @@ bool warnState = false;
 // Current state in the program sequence
 uint8_t currentState = STATE_WAIT_ON_RESET;
 
+const int buzzerPin = 2;
+const int buttonPin = 3;
+
 void setup()
 {
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 
+  // Set up pin for piezzo buzzer
+  pinMode(buzzerPin, OUTPUT);
+
+  // Set up interrupt for button to release brakes
+  // Wire for HIGH output when button is pushed
+  attachInterrupt(digitalPinToInterrupt(buttonPin), releaseBrakes, HIGH);
+
   // initialize serial1 for the sweep device
   Serial1.begin(115200); // sweep device
-  Serial.begin(9600);
+  Serial.begin(9600); // Serial for computer communication
+  Serial2.begin(9600); // serial connection to communicate with arduino pro minis
 
   // initialize counter variables and reset the current state
   reset();
@@ -255,6 +266,18 @@ void updateLED()
     // toggle the LED
     digitalWrite(LED_BUILTIN, ledState);
   //}
+}
+
+void dereaseBraking() {
+  Serial2.write(0);
+}
+
+void increaseBraking() {
+  Serial2.write(1);
+}
+
+void releaseBrakes() {
+  Serial2.write(2);
 }
 
 // Resets the variables and state so the sequence can be repeated
