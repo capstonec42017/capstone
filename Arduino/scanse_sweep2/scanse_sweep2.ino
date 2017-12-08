@@ -77,7 +77,12 @@ unsigned long times[3];
 long velocities;
 bool danger;
 bool warnState;
-unsigned int brakeCount;
+volatile unsigned int brakeCount;
+volatile bool releaseBrake = false;
+
+const int buzzerPin = 2;
+const int buttonPin = 3;
+const int ledWarnPin = 4;
 
 // Current state in the program sequence
 uint8_t currentState = STATE_WAIT_ON_RESET;
@@ -91,10 +96,22 @@ void setup()
   pinMode(10, OUTPUT);
   digitalWrite(8, LOW);
   digitalWrite(10, LOW);
+  pinMode(9, OUTPUT);
+  digitalWrite(9, LOW);
+
+  // Set up pin for piezo buzzer and warning LEDs
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(ledWarnPin, OUTPUT);
+  pinMode(buttonPin, INPUT);
+  // Set up interrupt for button to release brakes
+  // Wire for LOW output when button is pushed
+  attachInterrupt(digitalPinToInterrupt(buttonPin), releaseBrakes, FALLING);
+  //attachInterrupt(digitalPinToInterrupt(buttonPin), endRelease, RISING);
   
   // initialize serial1 for the sweep device
   Serial1.begin(115200); // sweep device
   Serial.begin(9600);
+  //Serial2.begin(9600);
 
   // initialize counter variables and reset the current state
   reset();
@@ -233,11 +250,8 @@ void updateBlinkFrequency()
   float velo1 = 10 * (dist1 - dist0) / ((time0 - time1));
   float velo2 = 10 * (dist2 - dist0) / ((time0 - time2));
   float velo = min(velo1, velo2);
-  //Serial.print("D0 " + String(dist0) + " D1 " + String(dist1) + " T0 " + String(time0) + " T1 " + String(time1) + " Velo " + String(velo) + "\n");
   float stopping_distance = velo*2.0 + sq(velo)/(2 * FRICTION_COEFFICIENT * GRAVITY) + (float)1.5;
-  //Serial.print("Stopping: " + String(stopping_distance) + "\n"); 
   if (stopping_distance * 100 > dist0) {
-    //Serial.print("Warning\n");
     danger = true;
   }
   else {
@@ -249,6 +263,7 @@ void updateBlinkFrequency()
 // Pull/release brakes, check if the system is still "involved" (either warning signal or actually braking)
 void updateLED()
 {
+  checkInterrupt();
   int state = LOW;
   digitalWrite(8, state);
   digitalWrite(10, state);
@@ -259,7 +274,7 @@ void updateLED()
     warnState = true;
     previousMillis = currentMillis;
     ledState = HIGH;
-    digitalWrite(LED_BUILTIN, ledState);
+    setWarnAlerts();
   }
   // past end of just warning, start or continue braking
   else if (previousMillis > 0 && currentMillis - previousMillis >= interval)
@@ -276,11 +291,21 @@ void updateLED()
         // determine the new State
         ledState = LOW;
         // toggle the LED
-        digitalWrite(LED_BUILTIN, ledState);
+        setWarnAlerts();
         danger = false;
       }
     }
   }
+}
+
+void setWarnAlerts()
+{
+  if (ledState == HIGH)
+    tone(buzzerPin, 440);
+  else
+    noTone(buzzerPin);
+  digitalWrite(ledWarnPin, ledState);
+  digitalWrite(LED_BUILTIN, ledState);
 }
 
 void increaseBraking()
@@ -289,7 +314,7 @@ void increaseBraking()
     brakeCount += 1;
     int state = HIGH;
     digitalWrite(8, state);
-    Serial.print("I\n");
+    //Serial.print("I\n");
     //Serial2.write(1);
   }
 }
@@ -302,11 +327,29 @@ bool decreaseBraking()
   brakeCount -= 1;
   int state = HIGH;
   digitalWrite(10, state);
-  Serial.print("D\n");
+  //Serial.print("D\n");
   //Serial2.write(0);
   return false;
 }
 
+void releaseBrakes()
+{
+  brakeCount = 0;
+  releaseBrake = true;
+  //Serial2.write(2);
+}
+
+
+void checkInterrupt()
+{
+  if (releaseBrake) {
+    //Serial2.write(2);
+    digitalWrite(9, HIGH);
+    releaseBrake = false;
+    delay(2000);
+    digitalWrite(9, LOW);
+  }
+}
 // Resets the variables and state so the sequence can be repeated
 void reset()
 {
@@ -319,6 +362,5 @@ void reset()
   warnState = false;
   brakeCount = 0;
   ledState = LOW;
-  //digitalWrite(LED_BUILTIN, ledState); // turn the LED off by making the voltage LOW
   device.reset();
 }
